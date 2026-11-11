@@ -51,4 +51,9 @@ export interface GhostMapProps {
   zoom?: number;
   /** Extra classes for the outer map wrapper. */
   className?: string;
+  /**
+   * Zoom/pan the map to fit the current routes and stops whenever they change
+   * (instead of only using the initial `center`/`zoom`).
+   */
+  fitToContent?: boolean;
 }

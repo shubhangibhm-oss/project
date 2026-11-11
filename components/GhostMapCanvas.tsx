@@ -133,6 +133,7 @@ export default function GhostMapCanvas({
   center = DEFAULT_CENTER,
   zoom = DEFAULT_ZOOM,
   className = "",
+  fitToContent = false,
 }: GhostMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -188,7 +189,17 @@ export default function GhostMapCanvas({
     group.clearLayers();
     routes.forEach((route) => addGlowingRoute(group, route));
     stops.forEach((stop) => addStopMarker(group, stop));
-  }, [routes, stops]);
+
+    // Optionally frame the freshly rendered content (e.g. an AI-normalized route).
+    if (fitToContent) {
+      const bounds = L.latLngBounds([]);
+      routes.forEach((route) => toLatLngs(route).forEach((point) => bounds.extend(point)));
+      stops.forEach((stop) => bounds.extend([stop.latitude, stop.longitude]));
+      if (bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [48, 48], maxZoom: 16 });
+      }
+    }
+  }, [routes, stops, fitToContent]);
 
   return (
     <div className={`ghost-map-container relative h-full min-h-[320px] w-full overflow-hidden ${className}`}>
