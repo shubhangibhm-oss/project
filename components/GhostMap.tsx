@@ -22,8 +22,28 @@ const GhostMapCanvas = dynamic(() => import("./GhostMapCanvas"), {
   ),
 });
 
-export default function GhostMap(props: GhostMapProps) {
-  return <GhostMapCanvas {...props} />;
+export default function GhostMap({
+  routes = [],
+  externalRoutes = [],
+  /**
+   * Part of the module's public prop surface so a host can pass the same
+   * integration callbacks to either entry point. RouteAIStudio is the component
+   * that actually fires it when a normalization succeeds.
+   */
+  onRouteNormalized: _onRouteNormalized,
+  ...rest
+}: GhostMapProps) {
+  // Saved routes from the team's database are drawn alongside local ones.
+  const allRoutes = externalRoutes.length > 0 ? [...externalRoutes, ...routes] : routes;
+
+  return <GhostMapCanvas {...rest} routes={allRoutes} />;
 }
 
-export type { GhostMapProps, GhostRoute, GhostStop, GhostRouteGeometry, LatLngTuple } from "./ghost-map.types";
+export type {
+  GhostMapProps,
+  GhostRoute,
+  GhostStop,
+  GhostRouteGeometry,
+  LatLngTuple,
+  NormalizedRouteData,
+} from "./ghost-map.types";

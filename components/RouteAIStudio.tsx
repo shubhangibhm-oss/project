@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useMemo, useRef, useState } from "react";
-import type { LatLngTuple } from "./ghost-map.types";
+import type { GhostRoute, LatLngTuple, NormalizedRouteData } from "./ghost-map.types";
 import type { ManagedRoute } from "./MapLayerManager";
 
 const MAX_INPUT_LENGTH = 4000;
@@ -22,17 +22,6 @@ const MapLayerManager = dynamic(() => import("./MapLayerManager"), {
   ),
 });
 
-/** Shape returned by `POST /api/normalize-route`. */
-interface NormalizedResponse {
-  routeName: string;
-  vehicleType: string;
-  estimatedFare: string;
-  frequency: string;
-  stops: { name: string; lat: number; lng: number }[];
-  /** `[latitude, longitude]` pairs. */
-  pathCoordinates: [number, number][];
-}
-
 /** Shown until the first normalization so the map is never a dead canvas. */
 const DEMO_ROUTE: ManagedRoute = {
   routeName: "Demo · MG Road → Indiranagar",
@@ -49,6 +38,34 @@ const DEMO_ROUTE: ManagedRoute = {
     { name: "Indiranagar 100 Feet Road", lat: 12.9784, lng: 77.6408 },
   ],
 };
+
+/** One-click prompts for a live pitch: fill the input and normalize immediately. */
+const DEMO_SCENARIOS: { label: string; prompt: string }[] = [
+  {
+    label: "Nagasandra → Sapthagiri",
+    prompt:
+      "Shared auto from Nagasandra Metro to Sapthagiri College via Bone Mill, ₹20, every 10 mins",
+  },
+  {
+    label: "Silk Board → E-City",
+    prompt: "Morning minibus from Silk Board to Electronic City Phase 1",
+  },
+  {
+    label: "Indiranagar → Domlur",
+    prompt: "Local feeder van from Indiranagar Metro to Domlur Flyover",
+  },
+];
+
+export interface RouteAIStudioProps {
+  /**
+   * Fired after a successful normalization — hand straight to your backend to
+   * persist the route (e.g. a Supabase insert). Also receives the offline
+   * fallback route when Gemini is unavailable, flagged with `isFallback: true`.
+   */
+  onRouteNormalized?: (routeData: NormalizedRouteData) => void;
+  /** Routes loaded from your database, rendered as a dashed "Saved" layer. */
+  externalRoutes?: GhostRoute[];
+}
 
 function pairFromNumbers(first: number, second: number): LatLngTuple | null {
   if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
@@ -118,12 +135,15 @@ function extractRawPoints(rawInput: string): LatLngTuple[] {
   return points;
 }
 
-export default function GhostRouteStudio() {
+export default function RouteAIStudio({
+  onRouteNormalized,
+  externalRoutes = [],
+}: RouteAIStudioProps) {
   const [rawInput, setRawInput] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<NormalizedResponse | null>(null);
+  const [result, setResult] = useState<NormalizedRouteData | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -132,11 +152,10 @@ export default function GhostRouteStudio() {
   // Stable identity so the map only re-frames itself when the route changes.
   const mapRoute = useMemo<ManagedRoute>(() => (result ? { ...result } : DEMO_ROUTE), [result]);
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function runNormalization(input: string) {
     if (isLoading) return;
 
-    const trimmed = rawInput.trim();
+    const trimmed = input.trim();
     if (!trimmed) {
       setError("Type an informal route description or paste some coordinates first.");
       textareaRef.current?.focus();
@@ -147,6 +166,7 @@ export default function GhostRouteStudio() {
       return;
     }
 
+    setRawInput(trimmed);
     setIsLoading(true);
     setError(null);
 
@@ -165,7 +185,10 @@ export default function GhostRouteStudio() {
         throw new Error(message || `Normalization failed (HTTP ${response.status}).`);
       }
 
-      setResult(payload as NormalizedResponse);
+      const routeData = payload as NormalizedRouteData;
+      setResult(routeData);
+      // Hand the normalized route to the host (e.g. to persist in Supabase).
+      onRouteNormalized?.(routeData);
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -175,6 +198,11 @@ export default function GhostRouteStudio() {
     } finally {
       setIsLoading(false);
     }
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await runNormalization(rawInput);
   }
 
   async function handleFile(file: File | null | undefined) {
@@ -210,6 +238,30 @@ export default function GhostRouteStudio() {
           <p className="mt-1 text-xs leading-relaxed text-slate-500">
             Describe the ride the way you&apos;d tell a friend, or paste messy GPS coordinates.
           </p>
+        </div>
+
+        <div
+          role="group"
+          aria-label="Quick Demo Scenarios"
+          className="flex flex-wrap items-center gap-1.5"
+        >
+          <span className="w-full text-[10px] tracking-[0.2em] text-cyan-300/70 uppercase">
+            Quick Demo Scenarios
+          </span>
+          {DEMO_SCENARIOS.map((scenario) => (
+            <button
+              key={scenario.label}
+              type="button"
+              title={scenario.prompt}
+              disabled={isLoading}
+              onClick={() => {
+                void runNormalization(scenario.prompt);
+              }}
+              className="rounded-full border border-cyan-500/25 bg-[#03070f] px-2.5 py-1 text-[10px] tracking-[0.04em] text-cyan-200/90 transition hover:border-cyan-400/50 hover:bg-cyan-400/10 disabled:cursor-wait disabled:opacity-50"
+            >
+              {scenario.label}
+            </button>
+          ))}
         </div>
 
         <textarea
@@ -315,7 +367,7 @@ export default function GhostRouteStudio() {
           </div>
         ) : (
           <p className="text-[11px] leading-relaxed text-slate-500">
-            Nothing normalized yet — the map is showing a demo route.
+            Nothing normalized yet — tap a demo scenario above or describe a route.
           </p>
         )}
       </form>
@@ -326,7 +378,11 @@ export default function GhostRouteStudio() {
         </p>
 
         <div className="relative h-[58vh] min-h-[340px] overflow-hidden rounded-2xl border border-cyan-500/25 shadow-[0_0_40px_-12px_rgba(0,243,255,0.55)] lg:h-[calc(100dvh-13rem)]">
-          <MapLayerManager route={mapRoute} rawCoordinates={rawPoints} />
+          <MapLayerManager
+            route={mapRoute}
+            rawCoordinates={rawPoints}
+            savedRoutes={externalRoutes}
+          />
 
           {result && rawPoints.length < 2 ? (
             <p className="pointer-events-none absolute bottom-3 left-1/2 z-[500] -translate-x-1/2 rounded-full border border-[#ffb86b]/40 bg-[#050b14]/90 px-3 py-1 text-[10px] text-[#ffcf94]">

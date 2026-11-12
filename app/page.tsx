@@ -1,4 +1,23 @@
-import GhostRouteStudio from "@/components/GhostRouteStudio";
+"use client";
+
+import dynamic from "next/dynamic";
+
+/**
+ * Leaflet touches `window`/`document` at import time, so the entire interactive
+ * studio — map canvas, Leaflet CSS, marker icons and plugins — is loaded on the
+ * client only. `ssr: false` keeps those modules out of server rendering and out
+ * of the prerendered HTML; only the placeholder below is produced on the server.
+ */
+const RouteAIStudio = dynamic(() => import("@/components/RouteAIStudio"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex min-h-[60vh] flex-1 items-center justify-center rounded-2xl border border-cyan-500/20 bg-[#050b14]">
+      <span className="animate-pulse text-xs tracking-[0.3em] text-cyan-300/80 uppercase">
+        Loading ghost routes…
+      </span>
+    </div>
+  ),
+});
 
 export default function Home() {
   return (
@@ -13,7 +32,7 @@ export default function Home() {
         </p>
       </header>
 
-      <GhostRouteStudio />
+      <RouteAIStudio />
     </main>
   );
 }

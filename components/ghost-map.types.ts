@@ -40,6 +40,19 @@ export interface GhostStop {
   color?: string;
 }
 
+/** Matches the JSON body returned by `POST /api/normalize-route`. */
+export interface NormalizedRouteData {
+  routeName: string;
+  vehicleType: string;
+  estimatedFare: string;
+  frequency: string;
+  /** Ordered stops, `[latitude, longitude]` inside `pathCoordinates`. */
+  stops: { name: string; lat: number; lng: number }[];
+  pathCoordinates: [number, number][];
+  /** True when this is the offline demo route rather than a live model reply. */
+  isFallback?: boolean;
+}
+
 export interface GhostMapProps {
   /** Routes drawn as glowing polylines. */
   routes?: GhostRoute[];
@@ -56,4 +69,15 @@ export interface GhostMapProps {
    * (instead of only using the initial `center`/`zoom`).
    */
   fitToContent?: boolean;
+  /**
+   * Routes persisted elsewhere (e.g. Supabase) and passed back in by the
+   * frontend team. Rendered alongside `routes`.
+   */
+  externalRoutes?: GhostRoute[];
+  /**
+   * Notified with the normalized route. RouteAIStudio is the component that
+   * fires this; the map accepts it so a host can wire one callback regardless of
+   * which entry point it renders.
+   */
+  onRouteNormalized?: (routeData: NormalizedRouteData) => void;
 }
