@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { NextResponse } from "next/server";
+import { snapStopsToRoads } from "@/lib/snapToRoads";
 
 /** The Gen AI SDK needs Node APIs; keep this off the edge runtime. */
 export const runtime = "nodejs";
@@ -213,8 +214,9 @@ const FALLBACK_ROUTE: NormalizedRoute = {
   ],
 };
 
-function fallbackResponse() {
-  return NextResponse.json({ ...FALLBACK_ROUTE, isFallback: true }, { status: 200 });
+async function fallbackResponse() {
+  const snapped = await withRoadSnapping(FALLBACK_ROUTE);
+  return NextResponse.json({ ...snapped, isFallback: true }, { status: 200 });
 }
 
 function errorResponse(status: number, error: string, detail?: string) {
@@ -258,6 +260,17 @@ async function generateRoute(
   return normalized;
 }
 
+/**
+ * Replaces the model's straight-ish polyline with real street geometry between
+ * the extracted stops. OSRM is best-effort: if it fails or exceeds its 3s cap,
+ * Gemini's original `pathCoordinates` are kept untouched.
+ */
+async function withRoadSnapping(route: NormalizedRoute): Promise<NormalizedRoute> {
+  const snapped = await snapStopsToRoads(route.stops);
+  if (!snapped || snapped.length < 2) return route;
+  return { ...route, pathCoordinates: snapped };
+}
+
 export async function POST(request: Request) {
   const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -287,7 +300,7 @@ export async function POST(request: Request) {
   // and simply moves on to the next attempt, and finally to the demo route.
   for (const model of [PRIMARY_MODEL, RETRY_MODEL]) {
     try {
-      const normalized = await generateRoute(ai, model, rawInput);
+      const normalized = await withRoadSnapping(await generateRoute(ai, model, rawInput));
       return NextResponse.json({ ...normalized, isFallback: false }, { status: 200 });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -296,5 +309,5 @@ export async function POST(request: Request) {
   }
 
   console.warn("[normalize-route] all model attempts failed — serving the demo fallback route");
-  return fallbackResponse();
+  return await fallbackResponse();
 }
