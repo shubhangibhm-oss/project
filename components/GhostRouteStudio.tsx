@@ -1,12 +1,26 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useMemo, useRef, useState } from "react";
-import GhostMap from "./GhostMap";
-import type { GhostRoute, GhostStop, LatLngTuple } from "./GhostMap";
+import type { LatLngTuple } from "./ghost-map.types";
+import type { ManagedRoute } from "./MapLayerManager";
 
-const CLEAN_COLOR = "#00f3ff";
-const RAW_COLOR = "#ffb86b";
 const MAX_INPUT_LENGTH = 4000;
+
+/**
+ * The layer manager owns the Leaflet map, so it is loaded client-only — the
+ * same `ssr: false` boundary used by the rest of the map module.
+ */
+const MapLayerManager = dynamic(() => import("./MapLayerManager"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full min-h-[320px] w-full items-center justify-center rounded-xl border border-cyan-500/20 bg-[#050b14]">
+      <span className="animate-pulse text-xs tracking-[0.3em] text-cyan-300/80 uppercase">
+        Mapping ghost routes…
+      </span>
+    </div>
+  ),
+});
 
 /** Shape returned by `POST /api/normalize-route`. */
 interface NormalizedResponse {
@@ -20,34 +34,21 @@ interface NormalizedResponse {
 }
 
 /** Shown until the first normalization so the map is never a dead canvas. */
-const DEMO_ROUTES: GhostRoute[] = [
-  {
-    id: "mg-road-indiranagar",
-    name: "MG Road → Indiranagar",
-    coordinates: [
-      [12.9756, 77.6068],
-      [12.9784, 77.622],
-      [12.9784, 77.6408],
-    ],
-  },
-  {
-    id: "mg-road-koramangala",
-    name: "MG Road → Koramangala",
-    color: "#7cf6a0",
-    coordinates: [
-      [12.9756, 77.6068],
-      [12.96, 77.61],
-      [12.95, 77.62],
-      [12.9352, 77.6245],
-    ],
-  },
-];
-
-const DEMO_STOPS: GhostStop[] = [
-  { id: "mg-road", name: "MG Road Metro", latitude: 12.9756, longitude: 77.6068 },
-  { id: "indiranagar", name: "Indiranagar", latitude: 12.9784, longitude: 77.6408 },
-  { id: "koramangala", name: "Koramangala", latitude: 12.9352, longitude: 77.6245, color: "#7cf6a0" },
-];
+const DEMO_ROUTE: ManagedRoute = {
+  routeName: "Demo · MG Road → Indiranagar",
+  vehicleType: "Shared Auto",
+  estimatedFare: "INR 20-25",
+  frequency: "Every 5-10 mins",
+  pathCoordinates: [
+    [12.9756, 77.6068],
+    [12.9784, 77.622],
+    [12.9784, 77.6408],
+  ],
+  stops: [
+    { name: "MG Road Metro", lat: 12.9756, lng: 77.6068 },
+    { name: "Indiranagar 100 Feet Road", lat: 12.9784, lng: 77.6408 },
+  ],
+};
 
 function pairFromNumbers(first: number, second: number): LatLngTuple | null {
   if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
@@ -117,121 +118,19 @@ function extractRawPoints(rawInput: string): LatLngTuple[] {
   return points;
 }
 
-function SplitToggle({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: "clean" | "raw";
-  onChange: (next: "clean" | "raw") => void;
-  disabled: boolean;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <span id="raw-vs-clean-label" className="text-[11px] tracking-[0.2em] text-slate-400 uppercase">
-        Show Raw vs. AI Cleaned
-      </span>
-      <div
-        role="group"
-        aria-labelledby="raw-vs-clean-label"
-        className={`flex rounded-full border border-cyan-500/25 bg-[#050b14] p-0.5 ${
-          disabled ? "opacity-50" : ""
-        }`}
-      >
-        <button
-          type="button"
-          aria-pressed={value === "raw"}
-          disabled={disabled}
-          onClick={() => onChange("raw")}
-          className={`rounded-full px-3 py-1 text-[11px] font-medium tracking-wide transition disabled:cursor-not-allowed ${
-            value === "raw" ? "bg-[#ffb86b]/20 text-[#ffcf94]" : "text-slate-400 hover:text-slate-200"
-          }`}
-        >
-          Raw
-        </button>
-        <button
-          type="button"
-          aria-pressed={value === "clean"}
-          disabled={disabled}
-          onClick={() => onChange("clean")}
-          className={`rounded-full px-3 py-1 text-[11px] font-medium tracking-wide transition disabled:cursor-not-allowed ${
-            value === "clean" ? "bg-cyan-400/20 text-cyan-200" : "text-slate-400 hover:text-slate-200"
-          }`}
-        >
-          AI Cleaned
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export default function GhostRouteStudio() {
   const [rawInput, setRawInput] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<NormalizedResponse | null>(null);
-  const [view, setView] = useState<"clean" | "raw">("clean");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const rawPoints = useMemo(() => extractRawPoints(rawInput), [rawInput]);
 
-  const cleanRoutes = useMemo<GhostRoute[]>(() => {
-    if (!result) return DEMO_ROUTES;
-    const coordinates =
-      result.pathCoordinates.length >= 2
-        ? result.pathCoordinates
-        : result.stops.map((stop) => [stop.lat, stop.lng] as LatLngTuple);
-    return [{ id: "ai-route", name: result.routeName, color: CLEAN_COLOR, coordinates }];
-  }, [result]);
-
-  const cleanStops = useMemo<GhostStop[]>(() => {
-    if (!result) return DEMO_STOPS;
-    return result.stops.map((stop, index) => ({
-      id: `ai-stop-${index}`,
-      name: stop.name,
-      latitude: stop.lat,
-      longitude: stop.lng,
-      color: CLEAN_COLOR,
-    }));
-  }, [result]);
-
-  /**
-   * The raw layer is the user's own points. If the input was prose only there is
-   * nothing jittery to draw, so fall back to the unsmoothed stop order.
-   */
-  const rawFromStops = rawPoints.length < 2;
-  const rawRoutes = useMemo<GhostRoute[]>(() => {
-    if (!result) return [];
-    const coordinates: LatLngTuple[] = rawFromStops
-      ? result.stops.map((stop) => [stop.lat, stop.lng] as LatLngTuple)
-      : rawPoints;
-    if (coordinates.length < 2) return [];
-    return [
-      {
-        id: "raw-route",
-        name: rawFromStops ? "Unnormalized stop order" : "Raw input coordinates",
-        color: RAW_COLOR,
-        coordinates,
-      },
-    ];
-  }, [result, rawPoints, rawFromStops]);
-
-  const rawStops = useMemo<GhostStop[]>(() => {
-    if (!result || rawFromStops) return [];
-    return rawPoints.map(([lat, lng], index) => ({
-      id: `raw-point-${index}`,
-      name: `Point ${index + 1}`,
-      latitude: lat,
-      longitude: lng,
-      color: RAW_COLOR,
-    }));
-  }, [result, rawPoints, rawFromStops]);
-
-  const showingRaw = view === "raw" && result !== null;
-  const activeRoutes = showingRaw ? rawRoutes : cleanRoutes;
-  const activeStops = showingRaw ? rawStops : cleanStops;
+  // Stable identity so the map only re-frames itself when the route changes.
+  const mapRoute = useMemo<ManagedRoute>(() => (result ? { ...result } : DEMO_ROUTE), [result]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -267,7 +166,6 @@ export default function GhostRouteStudio() {
       }
 
       setResult(payload as NormalizedResponse);
-      setView("clean");
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -417,32 +315,22 @@ export default function GhostRouteStudio() {
           </div>
         ) : (
           <p className="text-[11px] leading-relaxed text-slate-500">
-            Nothing normalized yet — the map below is showing demo routes.
+            Nothing normalized yet — the map is showing a demo route.
           </p>
         )}
       </form>
 
-      <div className="flex min-h-0 flex-col gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <SplitToggle value={view} onChange={setView} disabled={!result || isLoading} />
-          <div className="flex items-center gap-3 text-[10px] tracking-[0.15em] uppercase">
-            <span className="flex items-center gap-1.5 text-slate-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-[#00f3ff] shadow-[0_0_6px_#00f3ff]" />
-              AI cleaned
-            </span>
-            <span className="flex items-center gap-1.5 text-slate-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-[#ffb86b] shadow-[0_0_6px_#ffb86b]" />
-              Raw input
-            </span>
-          </div>
-        </div>
+      <div className="flex min-h-0 flex-col gap-2">
+        <p className="text-[11px] text-slate-500">
+          Hover the route line or any pin for its card · toggle layers directly on the map.
+        </p>
 
-        <div className="relative h-[58vh] min-h-[340px] overflow-hidden rounded-2xl border border-cyan-500/25 shadow-[0_0_40px_-12px_rgba(0,243,255,0.55)] lg:h-[calc(100dvh-14rem)]">
-          <GhostMap routes={activeRoutes} stops={activeStops} fitToContent />
+        <div className="relative h-[58vh] min-h-[340px] overflow-hidden rounded-2xl border border-cyan-500/25 shadow-[0_0_40px_-12px_rgba(0,243,255,0.55)] lg:h-[calc(100dvh-13rem)]">
+          <MapLayerManager route={mapRoute} rawCoordinates={rawPoints} />
 
-          {showingRaw && rawFromStops ? (
+          {result && rawPoints.length < 2 ? (
             <p className="pointer-events-none absolute bottom-3 left-1/2 z-[500] -translate-x-1/2 rounded-full border border-[#ffb86b]/40 bg-[#050b14]/90 px-3 py-1 text-[10px] text-[#ffcf94]">
-              No coordinates in the input — showing unsmoothed stop order
+              No coordinates in the input — raw pins are unavailable for this route
             </p>
           ) : null}
 
