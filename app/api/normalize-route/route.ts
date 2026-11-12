@@ -4,7 +4,11 @@ import { NextResponse } from "next/server";
 /** The Gen AI SDK needs Node APIs; keep this off the edge runtime. */
 export const runtime = "nodejs";
 
-const MODEL = "gemini-2.5-flash";
+// Primary model, with an automatic retry on a second model before falling back.
+const PRIMARY_MODEL = "gemini-3.5-flash-lite";
+const RETRY_MODEL = "gemini-3.8-flash";
+/** Per-attempt cap so a slow/hovering model can never hang a live demo. */
+const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_RAW_INPUT_LENGTH = 4000;
 
 const VEHICLE_TYPES = ["Shared Auto", "Minibus", "Informal Van"] as const;
@@ -23,6 +27,8 @@ interface NormalizedRoute {
   frequency: string;
   stops: NormalizedStop[];
   pathCoordinates: [number, number][];
+  /** True when this is the pre-built demo route, not a live model response. */
+  isFallback?: boolean;
 }
 
 const SYSTEM_PROMPT = `You are a GIS & Transit Data Normalizer for "Ghost Routes", an app that maps Bengaluru's informal transit (shared autos, minibuses, informal vans).
@@ -176,19 +182,87 @@ function normalizeRoute(raw: unknown): NormalizedRoute | null {
   };
 }
 
+/**
+ * Pre-built Bengaluru route used whenever the model cannot answer (high demand,
+ * quota, timeout, bad key). It matches the schema exactly, so the map always
+ * has a drawable route for a live demo.
+ */
+const FALLBACK_ROUTE: NormalizedRoute = {
+  routeName: "Majestic to Forum Koramangala via Sony World Signal",
+  vehicleType: "Shared Auto",
+  estimatedFare: "INR 25",
+  frequency: "Every 10-15 mins",
+  stops: [
+    { name: "Majestic (Kempegowda Bus Station)", lat: 12.9767, lng: 77.5713 },
+    { name: "KR Market", lat: 12.9618, lng: 77.5755 },
+    { name: "Lalbagh West Gate", lat: 12.9507, lng: 77.5848 },
+    { name: "Sony World Signal, Koramangala", lat: 12.936, lng: 77.6271 },
+    { name: "Forum Mall, Koramangala", lat: 12.9345, lng: 77.6113 },
+  ],
+  pathCoordinates: [
+    [12.9767, 77.5713],
+    [12.9722, 77.5772],
+    [12.9698, 77.5878],
+    [12.9651, 77.5991],
+    [12.9588, 77.6105],
+    [12.9517, 77.6198],
+    [12.9451, 77.6245],
+    [12.9402, 77.6268],
+    [12.936, 77.6271],
+    [12.9345, 77.6113],
+  ],
+};
+
+function fallbackResponse() {
+  return NextResponse.json({ ...FALLBACK_ROUTE, isFallback: true }, { status: 200 });
+}
+
 function errorResponse(status: number, error: string, detail?: string) {
   return NextResponse.json(detail ? { error, detail } : { error }, { status });
+}
+
+/** One model attempt. Throws on any failure so the caller can retry or fall back. */
+async function generateRoute(
+  ai: GoogleGenAI,
+  model: string,
+  rawInput: string,
+): Promise<NormalizedRoute> {
+  const response = await ai.models.generateContent({
+    model,
+    contents: rawInput.trim(),
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+      responseMimeType: "application/json",
+      responseSchema: RESPONSE_SCHEMA,
+      temperature: 0.2,
+      // Deterministic-ish extraction: minimal sampling, single candidate.
+      topP: 0.9,
+      candidateCount: 1,
+      httpOptions: { timeout: REQUEST_TIMEOUT_MS },
+    },
+  });
+
+  const text = response.text;
+  if (!text) throw new Error(`${model} returned an empty response`);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`${model} returned malformed JSON`);
+  }
+
+  const normalized = normalizeRoute(parsed);
+  if (!normalized) throw new Error(`${model} returned no usable stops or coordinates`);
+
+  return normalized;
 }
 
 export async function POST(request: Request) {
   const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
   if (!apiKey) {
-    console.error("[normalize-route] GEMINI_API_KEY is not set");
-    return errorResponse(
-      503,
-      "Route normalizer is not configured",
-      "Set GEMINI_API_KEY in the server environment and restart.",
-    );
+    console.warn("[normalize-route] GEMINI_API_KEY is not set — serving the demo fallback route");
+    return fallbackResponse();
   }
 
   let body: unknown;
@@ -208,56 +282,19 @@ export async function POST(request: Request) {
 
   const ai = new GoogleGenAI({ apiKey });
 
-  try {
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: rawInput.trim(),
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA,
-        temperature: 0.2,
-        // Deterministic-ish extraction: minimal sampling, single candidate.
-        topP: 0.9,
-        candidateCount: 1,
-      },
-    });
-
-    const text = response.text;
-    if (!text) {
-      return errorResponse(502, "The model returned an empty response", "Try again with a more detailed rawInput.");
-    }
-
-    let parsed: unknown;
+  // Primary model, then one automatic retry on the fallback model. Any error
+  // (503 high demand, 429 quota, timeout, bad key, unparseable output) is caught
+  // and simply moves on to the next attempt, and finally to the demo route.
+  for (const model of [PRIMARY_MODEL, RETRY_MODEL]) {
     try {
-      parsed = JSON.parse(text);
-    } catch {
-      console.error("[normalize-route] model returned non-JSON", text.slice(0, 500));
-      return errorResponse(502, "The model returned malformed JSON", "Try again; the request is safe to retry.");
+      const normalized = await generateRoute(ai, model, rawInput);
+      return NextResponse.json({ ...normalized, isFallback: false }, { status: 200 });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.warn(`[normalize-route] ${model} attempt failed: ${message}`);
     }
-
-    const normalized = normalizeRoute(parsed);
-    if (!normalized) {
-      return errorResponse(
-        502,
-        "Could not extract a usable route",
-        "The model did not return any valid stops or coordinates.",
-      );
-    }
-
-    return NextResponse.json(normalized, { status: 200 });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    console.error("[normalize-route] Gemini request failed:", message);
-
-    const status = /429|quota|rate limit|resource_exhausted/i.test(message)
-      ? 429
-      : /timeout|deadline/i.test(message)
-        ? 504
-        : /api key|permission|unauthenticated|401|403/i.test(message)
-          ? 502
-          : 502;
-
-    return errorResponse(status, "Route normalization failed", message);
   }
+
+  console.warn("[normalize-route] all model attempts failed — serving the demo fallback route");
+  return fallbackResponse();
 }
