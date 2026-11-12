@@ -3,11 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import type { GhostRoute } from "./ghost-map.types";
 
 const DEFAULT_CENTER: [number, number] = [13.028, 77.545]; // Bengaluru
 const DEFAULT_ZOOM = 13;
 const ROUTE_COLOR = "#00f3ff";
 const RAW_COLOR = "#ffb86b";
+const SAVED_COLOR = "#7cf6a0";
 
 export interface ManagedStop {
   name: string;
@@ -31,12 +33,14 @@ export interface MapLayerManagerProps {
   route?: ManagedRoute | null;
   /** Messy input coordinates, drawn as amber pins by the "Raw pins" layer. */
   rawCoordinates?: [number, number][];
+  /** Routes persisted elsewhere (e.g. Supabase), drawn as a dashed layer. */
+  savedRoutes?: GhostRoute[];
   center?: [number, number];
   zoom?: number;
   className?: string;
 }
 
-type LayerKey = "route" | "stops" | "raw";
+type LayerKey = "route" | "stops" | "raw" | "saved";
 type InteractiveLayer = L.Polyline | L.CircleMarker | L.Marker;
 
 function escapeHtml(value: string): string {
@@ -129,24 +133,32 @@ function createStopIcon(color: string): L.DivIcon {
 export default function MapLayerManager({
   route = null,
   rawCoordinates = [],
+  savedRoutes = [],
   center = DEFAULT_CENTER,
   zoom = DEFAULT_ZOOM,
   className = "",
 }: MapLayerManagerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const groupsRef = useRef<{ route: L.LayerGroup; stops: L.LayerGroup; raw: L.LayerGroup } | null>(null);
+  const groupsRef = useRef<{
+    route: L.LayerGroup;
+    stops: L.LayerGroup;
+    raw: L.LayerGroup;
+    saved: L.LayerGroup;
+  } | null>(null);
   const pinnedRef = useRef(false);
 
   const [layers, setLayers] = useState<Record<LayerKey, boolean>>({
     route: true,
     stops: true,
     raw: true,
+    saved: true,
   });
 
   const pathCount = route?.pathCoordinates?.length ?? 0;
   const stopCount = route?.stops?.length ?? 0;
   const rawCount = rawCoordinates.length;
+  const savedCount = savedRoutes.length;
 
   const routeLatLngs = useMemo<[number, number][]>(
     () => (route?.pathCoordinates ?? []).map(([lat, lng]) => [lat, lng] as [number, number]),
@@ -179,6 +191,7 @@ export default function MapLayerManager({
       route: L.layerGroup().addTo(map),
       stops: L.layerGroup().addTo(map),
       raw: L.layerGroup().addTo(map),
+      saved: L.layerGroup().addTo(map),
     };
 
     mapRef.current = map;
@@ -214,6 +227,7 @@ export default function MapLayerManager({
     groups.route.clearLayers();
     groups.stops.clearLayers();
     groups.raw.clearLayers();
+    groups.saved.clearLayers();
 
     /** Hover previews the card, click pins it open until the map is clicked. */
     const attachCard = (layer: InteractiveLayer, html: string) => {
@@ -289,12 +303,38 @@ export default function MapLayerManager({
       attachCard(pin, buildRawCard(lat, lng, index));
     });
 
+    // 4. Saved routes handed in by the host (e.g. rows from Supabase).
+    savedRoutes.forEach((saved) => {
+      const latlngs: [number, number][] = saved.geometry?.coordinates?.length
+        ? saved.geometry.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])
+        : (saved.coordinates ?? []);
+      if (latlngs.length < 2) return;
+
+      const line = L.polyline(latlngs, {
+        color: saved.color ?? SAVED_COLOR,
+        weight: 2.5,
+        opacity: 0.85,
+        dashArray: "6 7",
+        lineCap: "round",
+        lineJoin: "round",
+      }).addTo(groups.saved);
+
+      if (saved.name) {
+        line.bindTooltip(escapeHtml(saved.name), {
+          sticky: true,
+          direction: "top",
+          className: "mlm-tooltip",
+          opacity: 1,
+        });
+      }
+    });
+
     // Apply the controller's visibility state after every rebuild.
     (Object.keys(groups) as LayerKey[]).forEach((key) => {
       if (layers[key]) groups[key].addTo(map);
       else map.removeLayer(groups[key]);
     });
-  }, [route, routeLatLngs, rawCoordinates, layers]);
+  }, [route, routeLatLngs, rawCoordinates, savedRoutes, layers]);
 
   // Smoothly frame the whole AI route whenever a new one arrives.
   useEffect(() => {
@@ -304,6 +344,12 @@ export default function MapLayerManager({
     const bounds = L.latLngBounds([]);
     (route?.pathCoordinates ?? []).forEach(([lat, lng]) => bounds.extend([lat, lng]));
     (route?.stops ?? []).forEach((stop) => bounds.extend([stop.lat, stop.lng]));
+    savedRoutes.forEach((saved) => {
+      if (saved.geometry?.coordinates?.length) {
+        saved.geometry.coordinates.forEach(([lng, lat]) => bounds.extend([lat, lng]));
+      }
+      (saved.coordinates ?? []).forEach(([lat, lng]) => bounds.extend([lat, lng]));
+    });
 
     if (!bounds.isValid()) {
       // No AI route yet: fall back to the user's raw pins.
@@ -317,7 +363,7 @@ export default function MapLayerManager({
       animate: true,
       duration: 0.8,
     });
-  }, [route, rawCoordinates]);
+  }, [route, rawCoordinates, savedRoutes]);
 
   const toggleLayer = (key: LayerKey) => setLayers((current) => ({ ...current, [key]: !current[key] }));
 
@@ -325,6 +371,7 @@ export default function MapLayerManager({
     { key: "route", label: "Route line", count: pathCount },
     { key: "stops", label: "Stops", count: stopCount },
     { key: "raw", label: "Raw pins", count: rawCount },
+    { key: "saved", label: "Saved", count: savedCount },
   ];
 
   return (
